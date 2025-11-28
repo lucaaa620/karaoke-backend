@@ -21,14 +21,14 @@ COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ------------------------------
-# Install Whisper binary safely
+# Install Whisper binary (fixed)
 # ------------------------------
 
 WORKDIR /whisper
 
-# Download ZIP instead of tar.gz (safe & works on Render)
+# Download Whisper Linux x64 binary from official GitHub release
 RUN curl -L -o whisper.zip \
-    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/whisper-linux-x64.zip \
+    https://github.com/ggerganov/whisper.cpp/releases/download/v1.5.0/whisper-bin-x64.zip \
     && unzip whisper.zip -d whisper_bin \
     && chmod +x whisper_bin/*
 
