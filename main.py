@@ -1,41 +1,58 @@
 from fastapi import FastAPI, UploadFile, File
 import subprocess
-import uuid
 import os
-import json
+import uuid
 
 app = FastAPI()
 
-UPLOAD_DIR = "uploads"
-RESULTS_DIR = "results"
+@app.get("/")
+def home():
+    return {"message": "Backend is live and working!"}
 
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(RESULTS_DIR, exist_ok=True)
 
-@app.post("/transcribe/")
-async def transcribe(file: UploadFile = File(...)):
+# ------------------------------
+# Audio Transcription Endpoint
+# ------------------------------
+@app.post("/transcribe")
+async def transcribe_audio(file: UploadFile = File(...)):
+    # Step 1: Save uploaded audio temporarily
     file_id = str(uuid.uuid4())
-    input_path = f"{UPLOAD_DIR}/{file_id}.wav"
-    output_path = f"{RESULTS_DIR}/{file_id}.json"
+    input_path = f"/app/{file_id}.wav"
 
     with open(input_path, "wb") as f:
         f.write(await file.read())
 
-    # Run whisper.cpp model
-    subprocess.run([
-        "./main",
-        "-m", "models/ggml-base.bin",
-        "-f", input_path,
-        "-otxt",
-        "-of", f"{RESULTS_DIR}/{file_id}"
-    ])
+    # Step 2: Whisper binary path (from whisper_bin folder in Dockerfile)
+    whisper_path = "/whisper/whisper_bin/whisper"
 
-    # Read generated transcript
-    txt_path = f"{RESULTS_DIR}/{file_id}.txt"
-    if not os.path.exists(txt_path):
-        return {"error": "Transcription failed"}
+    # Step 3: Output file
+    output_path = f"/app/{file_id}.txt"
 
-    with open(txt_path, "r") as f:
-        text = f.read()
+    # Step 4: Run Whisper command
+    command = [
+        whisper_path,
+        input_path,
+        "--language", "auto",
+        "--model", "base",
+        "--output_format", "txt",
+        "--output_file", output_path
+    ]
 
-    return {"text": text, "id": file_id}
+    try:
+        subprocess.run(command, check=True)
+    except Exception as e:
+        return {"error": f"Whisper failed: {e}"}
+
+    # Step 5: Read output
+    if os.path.exists(output_path):
+        with open(output_path, "r", encoding="utf-8") as f:
+            text = f.read()
+    else:
+        text = "Transcription failed."
+
+    # Clean up temporary files
+    os.remove(input_path)
+    if os.path.exists(output_path):
+        os.remove(output_path)
+
+    return {"transcription": text}
