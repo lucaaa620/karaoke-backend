@@ -1,13 +1,7 @@
 # Karaoke Backend
 
-FastAPI backend for karaoke app.
+Start:
+uvicorn main:app --host 0.0.0.0 --port 8000
 
-## Run locally
-uvicorn main:app --reload
-
-## Endpoints
-GET /songs  
-POST /admin/upload  
-POST /admin/delete/{id}
-
-Token = myadmin123
+Admin Token:
+myadmin123
