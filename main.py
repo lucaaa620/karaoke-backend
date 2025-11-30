@@ -1,58 +1,149 @@
-from fastapi import FastAPI, UploadFile, File
-import subprocess
-import os
-import uuid
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+import uuid, json, shutil, logging, os
+from pathlib import Path
 
+# =======================
+# DIRECTORIES
+# =======================
+BASE = Path(__file__).resolve().parent
+UPLOAD = BASE / "uploads"
+AUDIO = UPLOAD / "audio"
+THUMBS = UPLOAD / "thumbs"
+SONGS_JSON = BASE / "songs.json"
+
+AUDIO.mkdir(parents=True, exist_ok=True)
+THUMBS.mkdir(parents=True, exist_ok=True)
+if not SONGS_JSON.exists():
+    SONGS_JSON.write_text("[]", encoding="utf-8")
+
+# =======================
+# CONSTANTS
+# =======================
+ADMIN_TOKEN = "myadmin123"   # FIXED TOKEN
+MAX_SIZE = 50 * 1024 * 1024  # 50 MB
+
+# =======================
+# APP + CORS
+# =======================
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],     # FULL OPEN
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.mount("/static", StaticFiles(directory=str(UPLOAD)), name="static")
+
+
+# =======================
+# HELPERS
+# =======================
+def load_songs():
+    return json.loads(SONGS_JSON.read_text())
+
+def save_songs(data):
+    SONGS_JSON.write_text(json.dumps(data, indent=2))
+
+
+async def save_file(upload: UploadFile, dest: Path):
+    with dest.open("wb") as buffer:
+        shutil.copyfileobj(upload.file, buffer)
+    upload.file.close()
+
+
+def abs_url(req: Request, path: str):
+    return str(req.base_url).rstrip("/") + path
+
+
+# =======================
+# ROUTES
+# =======================
 @app.get("/")
 def home():
-    return {"message": "Backend is live and working!"}
+    return {"status": "Backend OK"}
+
+@app.get("/songs")
+def songs():
+    return {"songs": load_songs()}
 
 
-# ------------------------------
-# Audio Transcription Endpoint
-# ------------------------------
-@app.post("/transcribe")
-async def transcribe_audio(file: UploadFile = File(...)):
-    # Step 1: Save uploaded audio temporarily
-    file_id = str(uuid.uuid4())
-    input_path = f"/app/{file_id}.wav"
+@app.post("/admin/upload")
+async def upload(
+    request: Request,
+    token: str = Form(...),
+    title: str = Form(...),
+    artist: str = Form(""),
+    audio: UploadFile = File(...),
+    lyrics_file: UploadFile = File(None),
+    thumb: UploadFile = File(None),
+):
 
-    with open(input_path, "wb") as f:
-        f.write(await file.read())
+    if token != ADMIN_TOKEN:
+        raise HTTPException(401, "Invalid token")
 
-    # Step 2: Whisper binary path (from whisper_bin folder in Dockerfile)
-    whisper_path = "/whisper/whisper_bin/whisper"
+    s_id = str(uuid.uuid4())
 
-    # Step 3: Output file
-    output_path = f"/app/{file_id}.txt"
+    # AUDIO SAVE
+    a_ext = Path(audio.filename).suffix
+    a_name = f"{s_id}{a_ext}"
+    a_path = AUDIO / a_name
+    await save_file(audio, a_path)
 
-    # Step 4: Run Whisper command
-    command = [
-        whisper_path,
-        input_path,
-        "--language", "auto",
-        "--model", "base",
-        "--output_format", "txt",
-        "--output_file", output_path
-    ]
+    # THUMB
+    thumb_url = ""
+    if thumb:
+        t_ext = Path(thumb.filename).suffix
+        t_name = f"{s_id}{t_ext}"
+        t_path = THUMBS / t_name
+        await save_file(thumb, t_path)
+        thumb_url = f"/static/thumbs/{t_name}"
 
-    try:
-        subprocess.run(command, check=True)
-    except Exception as e:
-        return {"error": f"Whisper failed: {e}"}
+    # LRC
+    lrc_url = ""
+    if lyrics_file:
+        l_name = f"{s_id}.lrc"
+        l_path = AUDIO / l_name
+        await save_file(lyrics_file, l_path)
+        lrc_url = f"/static/audio/{l_name}"
 
-    # Step 5: Read output
-    if os.path.exists(output_path):
-        with open(output_path, "r", encoding="utf-8") as f:
-            text = f.read()
-    else:
-        text = "Transcription failed."
+    new = {
+        "id": s_id,
+        "title": title,
+        "artist": artist,
+        "audioUrl": f"/static/audio/{a_name}",
+        "thumbUrl": thumb_url,
+        "lyricsLrc": lrc_url
+    }
 
-    # Clean up temporary files
-    os.remove(input_path)
-    if os.path.exists(output_path):
-        os.remove(output_path)
+    data = load_songs()
+    data.append(new)
+    save_songs(data)
 
-    return {"transcription": text}
+    new["audioUrl"] = abs_url(request, new["audioUrl"])
+    if thumb_url:
+        new["thumbUrl"] = abs_url(request, thumb_url)
+    if lrc_url:
+        new["lyricsLrc"] = abs_url(request, lrc_url)
+
+    return {"ok": True, "song": new}
+
+
+@app.post("/admin/delete/{song_id}")
+def delete(song_id: str, token: str = Form(...)):
+    if token != ADMIN_TOKEN:
+        raise HTTPException(401, "Invalid token")
+
+    data = load_songs()
+    data = [s for s in data if s["id"] != song_id]
+    save_songs(data)
+
+    return {"ok": True}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
