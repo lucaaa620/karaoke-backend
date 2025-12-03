@@ -1,26 +1,25 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-import uuid, shutil, json, os, requests
+from fastapi.staticfiles import StaticFiles
+import uuid, json, shutil, os, base64, requests
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
-UPLOAD_DIR = BASE_DIR / "uploads"
-AUDIO_DIR = UPLOAD_DIR / "audio"
-THUMB_DIR = UPLOAD_DIR / "thumbs"
-SONGS_FILE = BASE_DIR / "songs.json"
+# ===================== CONFIG =====================
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO")   # e.g. lucaaa620/karaoke-storage
+
+if not GITHUB_TOKEN or not GITHUB_REPO:
+    raise Exception("Missing GITHUB_TOKEN or GITHUB_REPO environment variable")
+
+GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}"
+RAW_BASE = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main"
 
 ADMIN_TOKEN = "myadmin123"
 
-# Create folders
-AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-THUMB_DIR.mkdir(parents=True, exist_ok=True)
-if not SONGS_FILE.exists():
-    SONGS_FILE.write_text("[]", encoding="utf-8")
-
 app = FastAPI()
 
-# CORS
+# CORS allow all
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,118 +27,127 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Static
-app.mount("/static", StaticFiles(directory=str(UPLOAD_DIR)), name="static")
+# =====================================================
+# Helper: upload file to GitHub
+# =====================================================
 
-def load_songs():
-    try:
-        return json.loads(SONGS_FILE.read_text())
-    except:
-        return []
+def upload_to_github(path: str, content: bytes):
+    url = f"{GITHUB_API}/contents/{path}"
+    encoded = base64.b64encode(content).decode()
 
-def save_songs(data):
-    SONGS_FILE.write_text(json.dumps(data, indent=2))
+    resp = requests.put(
+        url,
+        headers={
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github+json",
+        },
+        json={
+            "message": f"Upload {path}",
+            "content": encoded
+        }
+    )
+    if resp.status_code not in [200, 201]:
+        raise Exception(f"GitHub upload failed: {resp.text}")
 
-async def save_file(file, dest):
-    with open(dest, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    file.file.close()
+# =====================================================
+# Helper: Read+Write songs.json remotely
+# =====================================================
 
-def abs_url(request, path: str):
-    return str(request.base_url).rstrip("/") + path
+def get_songs_json():
+    url = f"{RAW_BASE}/songs.json"
+    return requests.get(url).json()
+
+def update_songs_json(data):
+    path = "songs.json"
+    url = f"{GITHUB_API}/contents/{path}"
+
+    # get existing SHA (required by GitHub)
+    existing = requests.get(url, headers={"Authorization": f"Bearer {GITHUB_TOKEN}"}).json()
+    sha = existing.get("sha")
+
+    encoded = base64.b64encode(json.dumps(data, indent=2).encode()).decode()
+
+    resp = requests.put(
+        url,
+        headers={"Authorization": f"Bearer {GITHUB_TOKEN}"},
+        json={
+            "message": "Update songs.json",
+            "content": encoded,
+            "sha": sha
+        }
+    )
+
+    if resp.status_code not in [200, 201]:
+        raise Exception("Failed to update songs.json: " + resp.text)
+
+# =====================================================
+# ROUTES
+# =====================================================
 
 @app.get("/")
 def home():
-    return {"status": "backend running"}
-
-# =======================================================
-# 🔥 NEW FINAL PERMANENT SONGS API (GitHub Storage)
-# =======================================================
-
-GITHUB_JSON_URL = "https://raw.githubusercontent.com/lucaaa620/karaoke-storage/main/songs.json"
+    return {"status": "Backend running", "github": GITHUB_REPO}
 
 @app.get("/songs")
 def get_songs():
-    try:
-        data = requests.get(GITHUB_JSON_URL, timeout=5).json()
-        return data
-    except:
-        return {"songs": []}
+    return get_songs_json()
 
 
-# =======================================================
-# 🔥 ADMIN UPLOAD (OPTIONAL - local)
-# =======================================================
+# =====================================================
+# 🔥 AUTO UPLOAD SONG (GitHub)
+# =====================================================
 
 @app.post("/admin/upload")
-async def upload(
-    request: Request,
+async def upload_song(
     token: str = Form(...),
     title: str = Form(...),
-    artist: str = Form(""),
+    artist: str = Form("Unknown"),
     audio: UploadFile = File(...),
-    lyrics_file: UploadFile = File(None),
-    thumb: UploadFile = File(None)
+    lyrics: UploadFile = File(None),
+    thumb: UploadFile = File(None),
 ):
     if token != ADMIN_TOKEN:
         raise HTTPException(401, "Invalid token")
 
-    song_id = str(uuid.uuid4())
+    song_id = str(uuid.uuid4())[:8]  # short ID
 
-    # audio
-    a_ext = Path(audio.filename).suffix
-    a_name = f"{song_id}{a_ext}"
-    a_path = AUDIO_DIR / a_name
-    await save_file(audio, a_path)
+    # -------- upload audio --------
+    audio_bytes = await audio.read()
+    audio_ext = Path(audio.filename).suffix
+    audio_path = f"audio/{song_id}{audio_ext}"
+    upload_to_github(audio_path, audio_bytes)
 
-    # thumb
-    t_url = ""
+    # -------- upload thumbnail --------
+    thumb_url = ""
     if thumb:
-        t_ext = Path(thumb.filename).suffix
-        t_name = f"{song_id}{t_ext}"
-        t_path = THUMB_DIR / t_name
-        await save_file(thumb, t_path)
-        t_url = f"/static/thumbs/{t_name}"
+        thumb_bytes = await thumb.read()
+        thumb_ext = Path(thumb.filename).suffix
+        thumb_path = f"thumbs/{song_id}{thumb_ext}"
+        upload_to_github(thumb_path, thumb_bytes)
+        thumb_url = f"{RAW_BASE}/{thumb_path}"
 
-    # lyrics
-    l_url = ""
-    if lyrics_file:
-        l_name = f"{song_id}.lrc"
-        l_path = AUDIO_DIR / l_name
-        await save_file(lyrics_file, l_path)
-        l_url = f"/static/audio/{l_name}"
+    # -------- upload lyrics --------
+    lyrics_url = ""
+    if lyrics:
+        lyrics_bytes = await lyrics.read()
+        lyr_path = f"lyrics/{song_id}.lrc"
+        upload_to_github(lyr_path, lyrics_bytes)
+        lyrics_url = f"{RAW_BASE}/{lyr_path}"
 
-    entry = {
+    # -------- update songs.json --------
+    db = get_songs_json()
+
+    new_entry = {
         "id": song_id,
         "title": title,
         "artist": artist,
-        "audioUrl": f"/static/audio/{a_name}",
-        "thumbUrl": t_url,
-        "lyricsLrc": l_url
+        "audioUrl": f"{RAW_BASE}/{audio_path}",
+        "thumbUrl": thumb_url,
+        "lyricsLrc": lyrics_url
     }
 
-    db = load_songs()
-    db.append(entry)
-    save_songs(db)
+    db["songs"].append(new_entry)
+    update_songs_json(db)
 
-    entry["audioUrl"] = abs_url(request, entry["audioUrl"])
-    if t_url:
-        entry["thumbUrl"] = abs_url(request, entry["thumbUrl"])
-    if l_url:
-        entry["lyricsLrc"] = abs_url(request, entry["lyricsLrc"])
+    return {"ok": True, "song": new_entry}
 
-    return {"ok": True, "song": entry}
-
-
-# =======================================================
-# 🔥 DELETE SONG LOCAL (OPTIONAL)
-# =======================================================
-
-@app.post("/admin/delete/{song_id}")
-def delete(song_id: str, token: str = Form(...)):
-    if token != ADMIN_TOKEN:
-        raise HTTPException(401, "Invalid token")
-    db = load_songs()
-    db = [s for s in db if s["id"] != song_id]
-    save_songs(db)
-    return {"ok": True}
