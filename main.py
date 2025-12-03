@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-import uuid, shutil, json, os
+import uuid, shutil, json, os, requests
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -52,9 +52,24 @@ def abs_url(request, path: str):
 def home():
     return {"status": "backend running"}
 
+# =======================================================
+# 🔥 NEW FINAL PERMANENT SONGS API (GitHub Storage)
+# =======================================================
+
+GITHUB_JSON_URL = "https://raw.githubusercontent.com/lucaaa620/karaoke-storage/main/songs.json"
+
 @app.get("/songs")
-def songs():
-    return {"songs": load_songs()}
+def get_songs():
+    try:
+        data = requests.get(GITHUB_JSON_URL, timeout=5).json()
+        return data
+    except:
+        return {"songs": []}
+
+
+# =======================================================
+# 🔥 ADMIN UPLOAD (OPTIONAL - local)
+# =======================================================
 
 @app.post("/admin/upload")
 async def upload(
@@ -114,6 +129,11 @@ async def upload(
         entry["lyricsLrc"] = abs_url(request, entry["lyricsLrc"])
 
     return {"ok": True, "song": entry}
+
+
+# =======================================================
+# 🔥 DELETE SONG LOCAL (OPTIONAL)
+# =======================================================
 
 @app.post("/admin/delete/{song_id}")
 def delete(song_id: str, token: str = Form(...)):
