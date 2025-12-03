@@ -150,4 +150,3 @@ async def upload_song(
     update_songs_json(db)
 
     return {"ok": True, "song": new_entry}
-
